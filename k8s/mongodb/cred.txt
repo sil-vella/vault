@@ -1,0 +1,4 @@
+hcvlt@ubuntu:/k8s/vault/helm$ vault kv put secret/flask/db \
+  db_user="cs_db_usr_001" \
+  db_pass="guhygG^u7GfY^YY^F" \
+  db_name="cs_db_001"

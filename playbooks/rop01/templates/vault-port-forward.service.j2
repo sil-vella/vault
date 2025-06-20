@@ -1,0 +1,13 @@
+[Unit]
+Description=Vault Port Forwarding Service
+After=network.target
+
+[Service]
+Type=simple
+User={{ new_user }}
+ExecStart={{ kubectl_path.stdout }} port-forward -n vault-system svc/vault 8200:8200 --address 0.0.0.0
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target 

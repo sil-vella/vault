@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flask-app
+  namespace: flask-app
+  labels:
+    app: flask-app
+spec:
+  replicas: 2  # Increased for high availability
+  selector:
+    matchLabels:
+      app: flask-app
+  template:
+    metadata:
+      labels:
+        app: flask-app
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "flask-app"
+        vault.hashicorp.com/agent-inject-token: "true"
+        vault.hashicorp.com/agent-inject-address: "http://vault-proxy:8200"
+        vault.hashicorp.com/agent-inject-auth-path: "auth/kubernetes"
+        vault.hashicorp.com/agent-inject-secret-flask-creds: "secret/data/flask-app/db"
+        vault.hashicorp.com/agent-inject-template-flask-creds: |
+          {
+            "username": "{{ .Data.data.db_user }}",
+            "password": "{{ .Data.data.db_pass }}",
+            "database": "{{ .Data.data.db_name }}"
+          }
+        vault.hashicorp.com/agent-init-first: "true"
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+    spec:
+      serviceAccountName: flask-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
+      containers:
+        - name: flask-app
+          image: silvella/cred-sys-flask-app:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 5001
+              name: http
+          env:
+            - name: FLASK_ENV
+              value: "production"
+            - name: VAULT_TOKEN_FILE
+              value: "/vault/secrets/token"
+            - name: DB_CREDS_FILE
+              value: "/vault/secrets/flask-creds"
+            - name: VAULT_ADDR
+              value: "http://vault-proxy:8200"
+            - name: VAULT_AUTH_PATH
+              value: "auth/kubernetes"
+            - name: VAULT_ROLE
+              value: "flask-app"
+            # Redis Configuration
+            - name: REDIS_SERVICE_NAME
+              value: "redis-master"
+            - name: REDIS_HOST
+              value: "redis-master"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: RATE_LIMIT_STORAGE_URL
+              value: "redis://redis-master.flask-app.svc.cluster.local:6379/0"
+            - name: RATE_LIMIT_ENABLED
+              value: "true"
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp-volume
+              mountPath: /tmp
+      volumes:
+        - name: tmp-volume
+          emptyDir: {} 

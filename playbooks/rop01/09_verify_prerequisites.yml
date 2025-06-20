@@ -1,0 +1,216 @@
+---
+- name: Verify Prerequisites and Setup
+  hosts: "{{ vm_name }}_private"
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Check required packages
+      block:
+        - name: Check curl
+          command: which curl
+          register: curl_check
+          changed_when: false
+          failed_when: false
+
+        - name: Check jq
+          command: which jq
+          register: jq_check
+          changed_when: false
+          failed_when: false
+
+        - name: Check vault
+          command: which vault
+          register: vault_check
+          changed_when: false
+          failed_when: false
+
+        - name: Check gcloud
+          command: gcloud --version
+          register: gcloud_check
+          changed_when: false
+          failed_when: false
+
+        - name: Check gcloud auth
+          command: gcloud auth list
+          register: gcloud_auth_check
+          changed_when: false
+          failed_when: false
+
+        - name: Check gcloud project
+          command: gcloud config get-value project
+          register: gcloud_project_check
+          changed_when: false
+          failed_when: false
+
+        - name: Check kubectl
+          command: kubectl version --client
+          register: kubectl_check
+          changed_when: false
+          failed_when: false
+
+        - name: Check cluster access
+          command: kubectl get nodes
+          register: cluster_check
+          changed_when: false
+          failed_when: false
+
+    - name: Install missing packages
+      block:
+        - name: Update apt cache
+          apt:
+            update_cache: yes
+            cache_valid_time: 3600
+
+        - name: Install curl and jq
+          apt:
+            name: "{{ item }}"
+            state: present
+          with_items:
+            - curl
+            - jq
+
+        - name: Install Vault CLI
+          block:
+            - name: Add HashiCorp GPG key
+              apt_key:
+                url: https://apt.releases.hashicorp.com/gpg
+                state: present
+                keyring: /usr/share/keyrings/hashicorp-archive-keyring.gpg
+
+            - name: Add HashiCorp repository
+              apt_repository:
+                repo: "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com {{ ansible_distribution_release }} main"
+                state: present
+                filename: hashicorp
+                update_cache: yes
+
+            - name: Install Vault
+              apt:
+                name: vault
+                state: present
+                update_cache: yes
+
+        - name: Install Google Cloud CLI
+          snap:
+            name: google-cloud-cli
+            state: present
+            classic: yes
+
+    - name: Configure Google Cloud CLI
+      block:
+        - name: Copy service account key
+          copy:
+            src: ../../k8s/vault/on_vps/vault-service-account.json
+            dest: /tmp/vault-service-account.json
+            mode: '0600'
+
+        - name: Activate service account
+          command: gcloud auth activate-service-account --key-file=/tmp/vault-service-account.json
+          register: gcloud_auth
+          changed_when: true
+
+        - name: Set GCP project
+          command: gcloud config set project vault-459512
+          when: gcloud_project_check.stdout != "vault-459512"
+
+        - name: Verify gcloud configuration
+          command: gcloud config list
+          register: gcloud_config
+          changed_when: false
+
+        - name: Display gcloud configuration
+          debug:
+            var: gcloud_config.stdout_lines
+
+        - name: Clean up service account key
+          file:
+            path: /tmp/vault-service-account.json
+            state: absent
+
+    - name: Verify Google Secret Manager access
+      block:
+        - name: Test access to unseal key
+          command: gcloud secrets versions access latest --secret="vault-unseal-key-1"
+          register: secret_access
+          changed_when: false
+          no_log: true
+
+        - name: Verify secret access
+          debug:
+            msg: "Successfully accessed Google Secret Manager"
+          when: secret_access.rc == 0
+
+    - name: Set up permanent port forwarding
+      block:
+        - name: Create user
+          user:
+            name: "{{ new_user }}"
+            shell: /bin/bash
+            create_home: yes
+            state: present
+
+        - name: Create .kube directory
+          file:
+            path: /home/{{ new_user }}/.kube
+            state: directory
+            owner: "{{ new_user }}"
+            group: "{{ new_user }}"
+            mode: '0700'
+
+        - name: Generate kubectl config
+          command: kubectl config view --raw
+          register: kubeconfig
+          changed_when: false
+
+        - name: Create kubectl config
+          copy:
+            content: "{{ kubeconfig.stdout }}"
+            dest: /home/{{ new_user }}/.kube/config
+            owner: "{{ new_user }}"
+            group: "{{ new_user }}"
+            mode: '0600'
+
+        - name: Verify kubectl path
+          command: which kubectl
+          register: kubectl_path
+          changed_when: false
+
+        - name: Create systemd service directory
+          file:
+            path: /etc/systemd/system
+            state: directory
+            mode: '0755'
+
+        - name: Create vault-port-forward service file
+          template:
+            src: templates/vault-port-forward.service.j2
+            dest: /etc/systemd/system/vault-port-forward.service
+            mode: '0644'
+          register: service_file
+
+        - name: Reload systemd
+          systemd:
+            daemon_reload: yes
+          when: service_file.changed
+
+        - name: Enable and start vault-port-forward service
+          systemd:
+            name: vault-port-forward
+            state: started
+            enabled: yes
+          register: service_status
+
+        - name: Wait for port forwarding to be ready
+          uri:
+            url: http://localhost:8200/v1/sys/health
+            method: GET
+            status_code: [200, 429, 501, 503]
+          register: vault_health
+          until: vault_health.status in [200, 429, 501, 503]
+          retries: 12
+          delay: 5
+
+        - name: Display service status
+          debug:
+            msg: "Vault port forwarding service is {{ 'running' if service_status.status.ActiveState == 'active' else 'not running' }}" 

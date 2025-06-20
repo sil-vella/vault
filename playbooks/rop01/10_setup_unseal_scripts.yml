@@ -1,0 +1,99 @@
+---
+- name: Setup Vault Unseal Scripts
+  hosts: "{{ vm_name }}_private"
+  become: true
+  environment:
+    VAULT_ADDR: "http://localhost:8200"
+  tasks:
+    - name: Create scripts directory
+      file:
+        path: /k8s/vault/scripts
+        state: directory
+        mode: '0755'
+
+    - name: Check Vault status
+      shell: vault status
+      register: vault_status
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display Vault status
+      debug:
+        var: vault_status.stdout_lines
+      when: vault_status.rc == 0
+
+    - name: Check if Vault is sealed
+      set_fact:
+        vault_sealed: "{{ 'Sealed' in vault_status.stdout and 'true' in vault_status.stdout }}"
+      when: vault_status.rc == 0
+
+    - name: Unseal Vault if it's sealed
+      block:
+        - name: Retrieve and apply unseal keys
+          shell: |
+            for i in 1 2 3; do
+              echo "Retrieving unseal key $i..."
+              KEY=$(gcloud secrets versions access latest --secret="vault-unseal-key-$i")
+              if [ $? -eq 0 ]; then
+                echo "Unsealing with key $i..."
+                vault operator unseal "$KEY"
+                if [ $? -eq 0 ]; then
+                  echo "Unseal with key $i successful"
+                else
+                  echo "Unseal with key $i failed"
+                fi
+              else
+                echo "Failed to retrieve unseal key $i"
+              fi
+            done
+          register: unseal_result
+          changed_when: true
+          no_log: true
+
+        - name: Verify Vault is unsealed
+          shell: vault status
+          register: vault_status_after
+          changed_when: false
+          until: "'Sealed' not in vault_status_after.stdout or 'false' in vault_status_after.stdout"
+          retries: 5
+          delay: 10
+
+        - name: Display final Vault status
+          debug:
+            var: vault_status_after.stdout_lines
+      when: vault_sealed | default(true)
+
+    - name: Create check_and_unseal.sh script
+      template:
+        src: check_and_unseal.sh.j2
+        dest: /k8s/vault/scripts/check_and_unseal.sh
+        mode: '0700'
+
+    - name: Create unseal.sh script
+      template:
+        src: unseal.sh.j2
+        dest: /k8s/vault/scripts/unseal.sh
+        mode: '0700'
+
+    - name: Create log files
+      file:
+        path: "{{ item }}"
+        state: touch
+        mode: '0600'
+      with_items:
+        - /k8s/vault/scripts/check.log
+        - /k8s/vault/scripts/unseal.log
+
+    - name: Setup cron job for check_and_unseal.sh
+      cron:
+        name: "Check and unseal Vault if needed"
+        job: "/k8s/vault/scripts/check_and_unseal.sh"
+        minute: "*"
+        user: root
+        state: present
+
+    - name: Ensure cron service is running
+      service:
+        name: cron
+        state: started
+        enabled: yes 

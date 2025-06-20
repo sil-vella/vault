@@ -1,0 +1,98 @@
+---
+- name: Setup and Configure WireGuard
+  hosts: "{{ vm_name }}_public"
+  become: true
+  become_user: root
+  tasks:
+    - name: Install WireGuard
+      apt:
+        name: wireguard
+        state: present
+        update_cache: yes
+
+    - name: Create WireGuard directory
+      file:
+        path: /etc/wireguard
+        state: directory
+        mode: '0700'
+        owner: root
+        group: root
+
+    - name: Generate server private key
+      shell: |
+        wg genkey > /etc/wireguard/server_private.key
+      args:
+        creates: /etc/wireguard/server_private.key
+
+    - name: Set permissions for server private key
+      file:
+        path: /etc/wireguard/server_private.key
+        mode: '0600'
+        owner: root
+        group: root
+
+    - name: Generate server public key from private key
+      shell: |
+        wg pubkey < /etc/wireguard/server_private.key > /etc/wireguard/server_public.key
+      args:
+        creates: /etc/wireguard/server_public.key
+
+    - name: Set permissions for server public key
+      file:
+        path: /etc/wireguard/server_public.key
+        mode: '0600'
+        owner: root
+        group: root
+
+    - name: Read server private key
+      slurp:
+        src: /etc/wireguard/server_private.key
+      register: server_private_key_content
+
+    - name: Create server WireGuard configuration
+      template:
+        src: templates/server_wg0.conf.j2
+        dest: /etc/wireguard/wg0.conf
+        mode: '0600'
+        owner: root
+        group: root
+      vars:
+        server_private_key: "{{ server_private_key_content.content | b64decode | trim }}"
+
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        sysctl_file: /etc/sysctl.d/99-wireguard.conf
+
+    - name: Apply sysctl changes
+      command: sysctl -p /etc/sysctl.d/99-wireguard.conf
+
+    - name: Enable and start WireGuard service
+      systemd:
+        name: wg-quick@wg0
+        enabled: yes
+        state: started
+
+    - name: Get server public key
+      command: cat /etc/wireguard/server_public.key
+      register: server_pubkey
+      changed_when: false
+
+    - name: Show server public key
+      debug:
+        msg: "Your server public key is: {{ server_pubkey.stdout }} . Make to update the wg0.conf peer public key with this value. Also make sure it's ip matches the server ip."
+
+    - name: Prompt user to add client public key to server config
+      debug:
+        msg: |
+          Please run the following command to get your client public key:
+          sudo cat /etc/wireguard/client_public.key
+          
+          Then add it to the server's /etc/wireguard/wg0.conf file in this format:
+          [Peer]
+          PublicKey = <your_client_public_key>
+          AllowedIPs = 10.0.0.2/32
+
+          Remeber to run: sudo wg-quick down wg0 && sudo wg-quick up wg0 on both the server and client.

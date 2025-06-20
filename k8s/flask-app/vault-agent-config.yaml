@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-agent-config
+  namespace: flask-app
+data:
+  config.hcl: |
+    auto_auth {
+      method "kubernetes" {
+        mount_path = "auth/kubernetes"
+        config = {
+          role = "flask-app"
+          host = "https://kubernetes.default.svc"
+          token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+          ca_cert = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        }
+      }
+      sink {
+        type = "file"
+        config = {
+          path = "/vault/secrets/token"
+        }
+      }
+    }
+    exit_after_auth = true
+    pid_file = "/home/vault/.pid"
+    vault {
+      address = "http://vault-proxy:8200"
+    }
+    template {
+      destination = "/vault/secrets/flask-creds"
+      contents = <<EOH
+      {{ with secret "secret/data/flask-app/db" }}
+      {
+        "username": "{{ .Data.data.db_user }}",
+        "password": "{{ .Data.data.db_pass }}",
+        "database": "{{ .Data.data.db_name }}"
+      }
+      {{ end }}
+      EOH
+    }
+    template_config {
+      exit_on_retry_failure = true
+    } 

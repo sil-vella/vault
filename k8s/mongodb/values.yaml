@@ -1,0 +1,7 @@
+auth:
+  enabled: false
+architecture: standalone
+persistence:
+  enabled: false
+namespace: mongodb
+

@@ -1,0 +1,122 @@
+---
+- name: Configure Vault for External Applications
+  hosts: "{{ vm_name }}_private"
+  become: true
+  vars:
+    flask_policy_name: flask-app-policy
+
+  pre_tasks:
+    - name: Set up Vault port-forwarding
+      command: kubectl get pods -n vault-system -l app.kubernetes.io/name=vault -o name | xargs -I {} kubectl port-forward -n vault-system {} 8200:8200 --address 0.0.0.0
+      async: 300
+      poll: 0
+      register: port_forward
+
+    - name: Wait for port-forwarding to be ready
+      wait_for:
+        host: 127.0.0.1
+        port: 8200
+        timeout: 30
+
+    - name: Read Vault credentials file
+      slurp:
+        src: "{{ playbook_dir }}/vault_creds/root-tok.txt"
+      register: vault_creds
+      delegate_to: localhost
+      become: false
+
+    - name: Extract root token
+      set_fact:
+        root_token: "{{ vault_creds.content | b64decode | regex_search('Initial Root Token: ([^\\n]+)', '\\1') | first }}"
+
+    - name: Debug root token
+      debug:
+        var: root_token
+
+    - name: Check Vault CLI availability
+      command: which vault
+      register: vault_cli_check
+
+    - name: Debug Vault CLI path
+      debug:
+        var: vault_cli_check.stdout
+
+    - name: Login to Vault with root token
+      command: vault login {{ root_token }}
+      environment:
+        VAULT_ADDR: "http://127.0.0.1:8200"
+      no_log: true
+
+  tasks:
+    - name: Enable Kubernetes auth method
+      command: vault auth enable kubernetes
+      environment:
+        VAULT_ADDR: "http://127.0.0.1:8200"
+      register: auth_enable
+      changed_when: auth_enable.rc == 0
+      failed_when: auth_enable.rc != 0 and "already enabled" not in auth_enable.stderr and "path is already in use" not in auth_enable.stderr
+
+    - name: Get Kubernetes CA certificate
+      shell: kubectl config view --raw --minify --flatten --output='jsonpath={.clusters[].cluster.certificate-authority-data}' | base64 --decode
+      register: kube_ca_cert
+
+    - name: Get Kubernetes host
+      command: kubectl config view --raw --minify --flatten --output='jsonpath={.clusters[].cluster.server}'
+      register: kube_host
+
+    - name: Get Vault Agent Injector pod name
+      shell: kubectl get pods -n vault-system -l app.kubernetes.io/name=vault-agent-injector -o jsonpath='{.items[0].metadata.name}'
+      register: injector_pod
+
+    - name: Get Kubernetes service account token from Vault Agent Injector pod
+      shell: kubectl exec -n vault-system {{ injector_pod.stdout }} -- cat /var/run/secrets/kubernetes.io/serviceaccount/token
+      register: kube_token
+      no_log: true
+
+    - name: Configure Kubernetes auth method
+      command: >
+        vault write auth/kubernetes/config
+        token_reviewer_jwt="{{ kube_token.stdout }}"
+        kubernetes_host="{{ kube_host.stdout }}"
+        kubernetes_ca_cert="{{ kube_ca_cert.stdout }}"
+        issuer="https://kubernetes.default.svc.cluster.local"
+      environment:
+        VAULT_ADDR: "http://127.0.0.1:8200"
+      register: auth_config
+      changed_when: auth_config.rc == 0
+      failed_when: auth_config.rc != 0 and "already configured" not in auth_config.stderr
+
+    - name: Create Vault policy for Flask applications
+      command: >
+        vault policy write {{ flask_policy_name }} -
+      args:
+        stdin: |
+          path "secret/data/flask-app/*" {
+            capabilities = ["read", "list"]
+          }
+
+          path "secret/metadata/flask-app/*" {
+            capabilities = ["list"]
+          }
+      environment:
+        VAULT_ADDR: "http://127.0.0.1:8200"
+      register: policy_create
+      changed_when: policy_create.rc == 0
+      failed_when: policy_create.rc != 0 and "already exists" not in policy_create.stderr
+
+    - name: Display configuration status
+      debug:
+        msg: |
+          Vault has been configured for external applications:
+          - Kubernetes auth method enabled
+          - Kubernetes auth method configured
+          - Policy created: {{ flask_policy_name }}
+          
+          External applications should:
+          1. Deploy the vault-proxy in their cluster
+          2. Configure their applications to use the vault-proxy service
+          3. Use the flask-app role for authentication
+          4. Access secrets under secret/data/flask-app/*
+          
+          The vault-proxy will handle the WireGuard tunnel connection
+          to the Vault server at 10.0.0.1:8200 

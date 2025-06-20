@@ -1,0 +1,51 @@
+---
+- name: Set up K3s and Kubernetes Access
+  hosts: "{{ vm_name }}_public"
+  become: true
+  become_method: sudo
+  tasks:
+    - name: Install K3s
+      shell: curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--write-kubeconfig-mode 644" sh -
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: Verify K3s Installation
+      service:
+        name: k3s
+        state: started
+        enabled: yes
+
+    - name: Create .kube directory
+      file:
+        path: /home/{{ new_user }}/.kube
+        state: directory
+        owner: "{{ new_user }}"
+        group: "{{ new_user }}"
+        mode: '0700'
+
+    - name: Fetch the Kubeconfig File
+      copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /home/{{ new_user }}/.kube/config
+        remote_src: yes
+        owner: "{{ new_user }}"
+        group: "{{ new_user }}"
+        mode: '0600'
+
+    - name: Set the KUBECONFIG Environment Variable
+      lineinfile:
+        path: /home/{{ new_user }}/.bashrc
+        line: 'export KUBECONFIG=/home/{{ new_user }}/.kube/config'
+        state: present
+
+    - name: Source .bashrc
+      shell: . /home/{{ new_user }}/.bashrc
+      args:
+        executable: /bin/bash
+
+    - name: Create kubectl symlink
+      file:
+        src: /usr/local/bin/k3s
+        dest: /usr/local/bin/kubectl
+        state: link
+        force: yes 

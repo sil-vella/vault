@@ -1,0 +1,370 @@
+---
+- name: Initial Vault Setup
+  hosts: "{{ vm_name }}_private"
+  become: true  # Enable sudo privileges
+  vars:
+    ansible_ssh_private_key_file: /Users/sil/.ssh/{{ vm_name }}_key
+    vault_namespace: vault-system
+    vault_helm_repo: hashicorp
+    vault_helm_repo_url: https://helm.releases.hashicorp.com
+    vault_chart_name: vault
+    vault_chart_version: latest
+    vault_config_dir: /k8s/vault
+    vault_helm_dir: "{{ vault_config_dir }}/helm"
+    vault_creds_dir: "{{ vault_config_dir }}/creds"
+    kubeconfig_dir: "{{ ansible_env.HOME }}/.kube"
+    kubeconfig_file: "{{ kubeconfig_dir }}/config"
+    local_creds_dir: "{{ playbook_dir }}/vault_creds"
+    new_user: "{{ ansible_user }}"
+
+  tasks:
+    - name: Check for required packages
+      block:
+        - name: Check for curl
+          command: which curl
+          register: curl_check
+          changed_when: false
+          failed_when: false
+
+        - name: Check for jq
+          command: which jq
+          register: jq_check
+          changed_when: false
+          failed_when: false
+
+        - name: Check for vault
+          command: which vault
+          register: vault_check
+          changed_when: false
+          failed_when: false
+
+        - name: Check for kubectl
+          command: which kubectl
+          register: kubectl_check
+          changed_when: false
+          failed_when: false
+
+      rescue:
+        - name: Install required packages
+          apt:
+            name: "{{ item }}"
+            state: present
+            update_cache: yes
+          with_items:
+            - curl
+            - jq
+          when: curl_check.rc != 0 or jq_check.rc != 0
+
+        - name: Install kubectl
+          block:
+            - name: Download kubectl binary
+              get_url:
+                url: https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl
+                dest: /usr/local/bin/kubectl
+                mode: '0755'
+          when: kubectl_check.rc != 0
+
+        - name: Install Vault CLI
+          block:
+            - name: Add HashiCorp GPG key
+              apt_key:
+                url: https://apt.releases.hashicorp.com/gpg
+                state: present
+
+            - name: Add HashiCorp repository
+              apt_repository:
+                repo: "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com {{ ansible_distribution_release }} main"
+                state: present
+                filename: hashicorp
+
+            - name: Install Vault package
+              apt:
+                name: vault
+                state: present
+                update_cache: yes
+          when: vault_check.rc != 0
+
+    - name: Install Helm
+      block:
+        - name: Download Helm installation script
+          get_url:
+            url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+            dest: /tmp/get-helm-3.sh
+            mode: '0755'
+
+        - name: Install Helm
+          shell: /tmp/get-helm-3.sh
+          args:
+            creates: /usr/local/bin/helm
+          environment:
+            PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+
+        - name: Verify Helm installation
+          shell: helm version
+          register: helm_version
+          changed_when: false
+          environment:
+            PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+
+    - name: Check if k3s is installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary
+
+    - name: Install k3s
+      shell: curl -sfL https://get.k3s.io | sh -
+      when: not k3s_binary.stat.exists
+      changed_when: true
+
+    - name: Wait for k3s to start
+      shell: systemctl is-active k3s
+      register: k3s_status
+      until: k3s_status.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Create .kube directory
+      file:
+        path: "{{ kubeconfig_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Copy kubeconfig
+      shell: cp /etc/rancher/k3s/k3s.yaml {{ kubeconfig_file }}
+      changed_when: true
+
+    - name: Set kubeconfig permissions
+      file:
+        path: "{{ kubeconfig_file }}"
+        mode: '0600'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Update kubeconfig server URL
+      replace:
+        path: "{{ kubeconfig_file }}"
+        regexp: 'https://127.0.0.1:6443'
+        replace: 'https://localhost:6443'
+
+    - name: Wait for Kubernetes API to be ready
+      shell: kubectl get nodes
+      environment:
+        KUBECONFIG: "{{ kubeconfig_file }}"
+      register: k8s_ready
+      until: k8s_ready.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Verify Kubernetes access
+      shell: kubectl cluster-info
+      environment:
+        KUBECONFIG: "{{ kubeconfig_file }}"
+      register: cluster_info
+      changed_when: false
+
+    - name: Create Vault namespace
+      shell: kubectl create namespace {{ vault_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_file }}"
+      changed_when: true
+
+    - name: Create base directory
+      file:
+        path: /k8s
+        state: directory
+        mode: '0755'
+
+    - name: Create Vault directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      with_items:
+        - "{{ vault_config_dir }}"
+        - "{{ vault_helm_dir }}"
+        - "{{ vault_creds_dir }}"
+
+    - name: Add HashiCorp Helm repository
+      shell: helm repo add {{ vault_helm_repo }} {{ vault_helm_repo_url }}
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+        KUBECONFIG: "{{ kubeconfig_file }}"
+      changed_when: true
+
+    - name: Update Helm repositories
+      shell: helm repo update
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+        KUBECONFIG: "{{ kubeconfig_file }}"
+      changed_when: true
+
+    - name: Generate Vault configuration
+      template:
+        src: templates/vault-config.yaml.j2
+        dest: "{{ vault_helm_dir }}/vault-config.yaml"
+        mode: '0644'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Install Vault using Helm
+      shell: >
+        helm upgrade --install vault {{ vault_helm_repo }}/{{ vault_chart_name }}
+        -f {{ vault_helm_dir }}/vault-config.yaml
+        --namespace {{ vault_namespace }}
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+        KUBECONFIG: "{{ kubeconfig_file }}"
+      changed_when: true
+
+    - name: Check Vault pod status
+      shell: kubectl get pods -n {{ vault_namespace }} -l app.kubernetes.io/name=vault -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_file }}"
+      register: pod_status
+      changed_when: false
+
+    - name: Display pod status
+      debug:
+        var: pod_status.stdout_lines
+
+    - name: Wait for Vault pod to be running
+      shell: >
+        kubectl get pod vault-0 -n {{ vault_namespace }} -o jsonpath='{.status.phase}' | grep -q Running
+      environment:
+        KUBECONFIG: "{{ kubeconfig_file }}"
+      register: wait_result
+      changed_when: wait_result.rc == 0
+      retries: 30
+      delay: 10
+      until: wait_result.rc == 0
+
+    - name: Check pod logs
+      shell: kubectl logs -n {{ vault_namespace }} vault-0
+      environment:
+        KUBECONFIG: "{{ kubeconfig_file }}"
+      register: pod_logs
+      changed_when: false
+
+    - name: Display pod logs
+      debug:
+        var: pod_logs.stdout_lines
+
+    - name: Check Vault status
+      shell: kubectl exec -n {{ vault_namespace }} vault-0 -- vault status
+      environment:
+        KUBECONFIG: "{{ kubeconfig_file }}"
+      register: vault_status
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display Vault status
+      debug:
+        var: vault_status.stdout_lines
+
+    - name: Check if Vault is already initialized
+      set_fact:
+        vault_initialized: "{{ 'Initialized        true' in vault_status.stdout }}"
+      when: vault_status.rc == 0
+
+    - name: Initialize Vault
+      shell: >
+        kubectl exec -n {{ vault_namespace }} vault-0 -- 
+        vault operator init -key-shares=5 -key-threshold=3
+      environment:
+        KUBECONFIG: "{{ kubeconfig_file }}"
+      register: vault_init
+      changed_when: true
+      when: not vault_initialized | default(false)
+      ignore_errors: true
+
+    - name: Display initialization status
+      debug:
+        msg: >-
+          {% if vault_initialized | default(false) %}
+          Vault is already initialized. No changes were made.
+          {% elif vault_init.rc == 0 %}
+          Vault has been initialized. Credentials have been saved to {{ local_creds_dir }}/root-tok.txt
+          {% else %}
+          Failed to initialize Vault: {{ vault_init.stderr }}
+          {% endif %}
+
+    - name: Create local credentials directory
+      file:
+        path: "{{ local_creds_dir }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      become: false
+      when: not vault_initialized | default(false)
+
+    - name: Save Vault credentials locally
+      copy:
+        content: "{{ vault_init.stdout }}"
+        dest: "{{ local_creds_dir }}/root-tok.txt"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+      when:
+        - not vault_initialized | default(false)
+        - vault_init.stdout is defined
+        - vault_init.stdout | length > 0
+
+    - name: Fail if credentials file is empty after initialization
+      fail:
+        msg: >
+          Vault was just initialized, but the credentials file ({{ local_creds_dir }}/root-tok.txt) is empty!
+          This means the initialization output was empty or there was an error. Please check the Vault pod logs and rerun the playbook.
+      when:
+        - not vault_initialized | default(false)
+        - (lookup('file', local_creds_dir + '/root-tok.txt', errors='ignore') | length == 0)
+
+    - name: Display Vault initialization status
+      debug:
+        msg: >-
+          {% if vault_initialized | default(false) %}
+          Vault is already initialized. No changes were made.
+          {% else %}
+          Vault has been initialized. Credentials have been saved to {{ local_creds_dir }}/root-tok.txt
+          {% endif %}
+
+    - name: Display Vault credentials
+      debug:
+        msg: "{{ vault_init.stdout_lines }}"
+      when: not vault_initialized | default(false)
+
+    - name: Create systemd unit file for vault-port-forward
+      copy:
+        dest: /etc/systemd/system/vault-port-forward.service
+        content: |
+          [Unit]
+          Description=Kubernetes port-forward for Vault
+          After=network.target
+
+          [Service]
+          ExecStart=/usr/local/bin/kubectl port-forward -n vault-system svc/vault 8200:8200
+          Restart=always
+          User={{ new_user }}
+          Environment=KUBECONFIG={{ kubeconfig_file }}
+
+          [Install]
+          WantedBy=multi-user.target
+      become: true
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+      become: true
+
+    - name: Enable and start vault-port-forward service
+      systemd:
+        name: vault-port-forward
+        state: started
+        enabled: yes 

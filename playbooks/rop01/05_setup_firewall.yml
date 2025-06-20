@@ -1,0 +1,105 @@
+---
+- name: Initial Firewall Setup
+  hosts: "{{ vm_name }}_private"
+  become: true
+  tasks:
+    - name: Allow localhost traffic
+      iptables:
+        table: filter
+        chain: INPUT
+        in_interface: lo
+        jump: ACCEPT
+        comment: Allow localhost
+        state: present
+
+    - name: Allow established connections
+      iptables:
+        table: filter
+        chain: INPUT
+        match: state
+        ctstate: ESTABLISHED,RELATED
+        jump: ACCEPT
+        comment: Allow established connections
+        state: present
+
+    - name: Allow SSH from public IP
+      iptables:
+        table: filter
+        chain: INPUT
+        protocol: tcp
+        destination_port: 22
+        source: "!10.0.0.0/24"
+        jump: ACCEPT
+        comment: Allow SSH from public IP
+        state: present
+
+    - name: Allow SSH from WireGuard network
+      iptables:
+        table: filter
+        chain: INPUT
+        protocol: tcp
+        destination_port: 22
+        source: 10.0.0.0/24
+        jump: ACCEPT
+        comment: Allow SSH from WireGuard network
+        state: present
+
+    - name: Allow WireGuard connections
+      iptables:
+        table: filter
+        chain: INPUT
+        protocol: udp
+        destination_port: "{{ server_port }}"
+        jump: ACCEPT
+        comment: Allow WireGuard
+        state: present
+
+    - name: Allow traffic from WireGuard interface
+      iptables:
+        table: filter
+        chain: INPUT
+        in_interface: wg0
+        jump: ACCEPT
+        comment: Allow WireGuard interface
+        state: present
+
+    - name: Allow forwarding from WireGuard interface
+      iptables:
+        table: filter
+        chain: FORWARD
+        in_interface: wg0
+        jump: ACCEPT
+        comment: Allow forwarding from WireGuard
+        state: present
+
+    - name: Allow forwarding to WireGuard interface
+      iptables:
+        table: filter
+        chain: FORWARD
+        out_interface: wg0
+        jump: ACCEPT
+        comment: Allow forwarding to WireGuard
+        state: present
+
+    - name: Set default policies
+      iptables:
+        chain: "{{ item.chain }}"
+        policy: "{{ item.policy }}"
+        state: present
+      with_items:
+        - { chain: 'INPUT', policy: 'DROP' }
+        - { chain: 'FORWARD', policy: 'DROP' }
+        - { chain: 'OUTPUT', policy: 'ACCEPT' }
+
+    - name: Save iptables rules
+      shell: netfilter-persistent save
+      args:
+        creates: /etc/iptables/rules.v4
+
+    - name: Display current iptables rules
+      shell: iptables -L -v -n
+      register: iptables_output
+
+    - name: Show iptables rules
+      debug:
+        var: iptables_output.stdout_lines 

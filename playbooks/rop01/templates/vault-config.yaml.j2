@@ -1,0 +1,86 @@
+global:
+  enabled: true
+  nameOverride: ""
+  fullnameOverride: ""
+
+server:
+  replicas: 1
+
+  storage:
+    kubernetes:
+      enabled: true
+      storageClass: "standard"
+      accessModes:
+        - ReadWriteOnce
+      size: 5Gi
+
+  unsealer:
+    kubernetes:
+      enabled: false
+
+  service:
+    enabled: true
+    type: ClusterIP
+    name: vault-internal
+    port: 8200
+    targetPort: 8200
+
+  listener:
+    tcp:
+      address: 10.0.0.1:8200
+      cluster_address: 10.0.0.1:8201
+      tls_disable: 1
+
+  ui:
+    enabled: true
+
+  # Add Kubernetes authentication configuration
+  extraEnvironmentVars:
+    VAULT_AUTH_KUBERNETES_ENABLED: "true"
+    VAULT_AUTH_KUBERNETES_HOST: "https://kubernetes.default.svc"
+    VAULT_AUTH_KUBERNETES_TOKEN_REVIEWER_JWT: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    VAULT_AUTH_KUBERNETES_CA_CERT: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+  # Add service account configuration
+  serviceAccount:
+    create: true
+    name: vault
+    annotations:
+      kubernetes.io/service-account.name: vault
+
+  # Add RBAC configuration
+  rbac:
+    create: true
+    rules:
+      - apiGroups: [""]
+        resources: ["secrets"]
+        verbs: ["*"]
+      - apiGroups: [""]
+        resources: ["serviceaccounts"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: [""]
+        resources: ["pods"]
+        verbs: ["get", "list", "watch"]
+
+  # Add network policy
+  networkPolicy:
+    enabled: true
+    ingress:
+      - from:
+        - namespaceSelector:
+            matchLabels:
+              name: flask-app
+        ports:
+        - protocol: TCP
+          port: 8200
+
+  # Liveness probe configuration (commented out as in original)
+  # livenessProbe:
+  #   enabled: true
+  #   path: "/v1/sys/health"
+  #   port: 8200
+  #   scheme: "HTTP"
+  #   initialDelaySeconds: 30
+  #   periodSeconds: 10
+  #   timeoutSeconds: 5
+  #   failureThreshold: 3 

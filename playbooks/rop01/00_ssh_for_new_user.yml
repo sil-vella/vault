@@ -1,0 +1,49 @@
+---
+- name: SSH Setup for New User
+  hosts: "{{ vm_name }}_initial"
+  become: true
+  tasks:
+    - name: Create new user
+      user:
+        name: "{{ new_user }}"
+        shell: /bin/bash
+        create_home: yes
+        state: present
+
+    - name: Create SSH directory for new user
+      file:
+        path: "/home/{{ new_user }}/.ssh"
+        state: directory
+        owner: "{{ new_user }}"
+        group: "{{ new_user }}"
+        mode: '0700'
+
+    - name: Create authorized_keys file
+      file:
+        path: "/home/{{ new_user }}/.ssh/authorized_keys"
+        state: touch
+        owner: "{{ new_user }}"
+        group: "{{ new_user }}"
+        mode: '0600'
+
+    - name: Add SSH key for new user
+      authorized_key:
+        user: "{{ new_user }}"
+        key: "{{ lookup('file', '~/.ssh/' + vm_name + '_key.pub') }}"
+
+    - name: Add new user to sudo group
+      user:
+        name: "{{ new_user }}"
+        groups: sudo
+        append: yes
+
+    - name: Configure sudoers for new user
+      lineinfile:
+        path: /etc/sudoers
+        line: "{{ new_user }} ALL=(ALL) NOPASSWD:ALL"
+        state: present
+        validate: 'visudo -cf %s'
+
+    - name: Display completion message
+      debug:
+        msg: "SSH key setup complete. You can now SSH as {{ new_user }} using the {{ vm_name }}_key" 

@@ -1,0 +1,172 @@
+---
+- name: Configure Vault Authentication and Secrets Engine
+  hosts: "{{ vm_name }}_private"
+  become: true
+  environment:
+    VAULT_ADDR: "http://localhost:8200"
+  vars:
+    vault_creds_file: "{{ playbook_dir }}/vault_creds/root-tok.txt"
+
+  pre_tasks:
+    - name: Read Vault credentials file
+      slurp:
+        path: "{{ vault_creds_file }}"
+      register: vault_creds
+      delegate_to: localhost
+      become: false
+
+    - name: Extract root token
+      set_fact:
+        root_token: "{{ vault_creds.content | b64decode | regex_findall('Initial Root Token: ([^\\n]+)') | first }}"
+      no_log: true
+
+    - name: Wait for Vault to be unsealed and ready
+      shell: vault status
+      register: vault_status
+      until: "'Sealed' not in vault_status.stdout or 'false' in vault_status.stdout"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Display Vault status
+      debug:
+        var: vault_status.stdout_lines
+
+    - name: Clear any existing Vault token
+      shell: vault token revoke -self || true
+      ignore_errors: true
+      changed_when: false
+
+    - name: Clear Vault token file if it exists
+      file:
+        path: "{{ ansible_env.HOME }}/.vault-token"
+        state: absent
+      ignore_errors: true
+      changed_when: false
+
+    - name: Ensure Vault port forwarding service is running
+      systemd:
+        name: vault-port-forward
+        state: started
+        enabled: yes
+      register: port_forward_status
+
+    - name: Wait for Vault port forwarding to be ready
+      uri:
+        url: http://localhost:8200/v1/sys/health
+        method: GET
+        status_code: [200, 429, 501, 503]
+      register: vault_health
+      until: vault_health.status in [200, 429, 501, 503]
+      retries: 12
+      delay: 5
+
+    - name: Get Kubernetes API server address
+      shell: kubectl config view --raw --minify --flatten --output='jsonpath={.clusters[0].cluster.server}'
+      register: kube_api_server
+      changed_when: false
+
+    - name: Get Kubernetes CA certificate
+      shell: kubectl config view --raw --minify --flatten --output='jsonpath={.clusters[0].cluster.certificate-authority-data}'
+      register: kube_ca_cert_b64
+      changed_when: false
+
+    - name: Decode Kubernetes CA certificate
+      set_fact:
+        kube_ca_cert: "{{ kube_ca_cert_b64.stdout | b64decode }}"
+      no_log: true
+
+    - name: Get Vault Agent Injector pod name
+      shell: kubectl get pods -n vault-system -l app.kubernetes.io/name=vault-agent-injector -o jsonpath='{.items[0].metadata.name}'
+      register: injector_pod
+      changed_when: false
+
+    - name: Get service account token from pod
+      shell: kubectl exec -n vault-system {{ injector_pod.stdout }} -- cat /var/run/secrets/kubernetes.io/serviceaccount/token
+      register: kube_sa_token
+      changed_when: false
+      no_log: true
+
+  tasks:
+    - name: Login to Vault with root token
+      shell: vault login {{ root_token }}
+      no_log: true
+
+    - name: Check mutating webhook configuration
+      shell: kubectl get mutatingwebhookconfigurations vault-agent-injector-cfg
+      register: webhook_check
+      changed_when: false
+
+    - name: Check Vault Agent Injector service
+      shell: kubectl get svc vault-agent-injector-svc -n vault-system
+      register: service_check
+      changed_when: false
+
+    - name: Check Vault Agent Injector pods
+      shell: kubectl get pods -n vault-system -l app.kubernetes.io/name=vault-agent-injector
+      register: pods_check
+      changed_when: false
+
+    - name: Display Vault Agent Injector status
+      debug:
+        msg: "Vault Agent Injector is properly configured"
+
+    - name: Enable KV-V2 Secrets Engine
+      shell: vault secrets enable -version=2 -path=secret kv
+      register: kv_enable
+      changed_when: kv_enable.rc == 0
+      failed_when: kv_enable.rc != 0 and "already enabled" not in kv_enable.stderr
+
+    - name: Enable Kubernetes Authentication
+      shell: vault auth enable kubernetes
+      register: k8s_auth_enable
+      changed_when: k8s_auth_enable.rc == 0
+      failed_when: k8s_auth_enable.rc != 0 and "already enabled" not in k8s_auth_enable.stderr
+
+    - name: Configure Kubernetes Authentication
+      shell: |
+        vault write auth/kubernetes/config \
+          token_reviewer_jwt='{{ kube_sa_token.stdout }}' \
+          kubernetes_host='{{ kube_api_server.stdout }}' \
+          kubernetes_ca_cert='{{ kube_ca_cert }}'
+      register: k8s_auth_config
+      changed_when: k8s_auth_config.rc == 0
+      failed_when: k8s_auth_config.rc != 0 and "already configured" not in k8s_auth_config.stderr
+
+    - name: Create Vault Policy
+      shell: |
+        vault policy write vault-agent-injector - <<EOF
+        path "secret/data/*" {
+          capabilities = ["read"]
+        }
+        EOF
+      register: policy_create
+      changed_when: policy_create.rc == 0
+      failed_when: policy_create.rc != 0 and "already exists" not in policy_create.stderr
+
+    - name: Create Kubernetes Authentication Role
+      shell: |
+        vault write auth/kubernetes/role/vault-agent-injector \
+          bound_service_account_names=vault-agent-injector \
+          bound_service_account_namespaces=vault-system \
+          policies=vault-agent-injector \
+          ttl=1h
+      register: role_create
+      changed_when: role_create.rc == 0
+      failed_when: role_create.rc != 0 and "already exists" not in role_create.stderr
+
+    - name: Verify Vault Configuration
+      block:
+        - name: Check KV-V2 Secrets Engine
+          command: vault secrets list
+          register: secrets_list
+          changed_when: false
+
+        - name: Check Kubernetes Auth Method
+          command: vault auth list
+          register: auth_list
+          changed_when: false
+
+        - name: Display Verification Results
+          debug:
+            msg: "Vault configuration verified successfully" 

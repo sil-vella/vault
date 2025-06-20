@@ -1,0 +1,123 @@
+---
+- name: Store Vault Keys in Google Secret Manager
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    vault_creds_file: "{{ playbook_dir }}/vault_creds/root-tok.txt"
+    gcp_project: vault-459512  # Replace with your actual project ID
+
+  tasks:
+    - name: Check if gcloud is installed
+      command: which gcloud
+      register: gcloud_check
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if gcloud is not installed
+      fail:
+        msg: "gcloud CLI is not installed. Please install it first using 'brew install google-cloud-sdk'"
+      when: gcloud_check.rc != 0
+
+    - name: Check gcloud version
+      command: gcloud version
+      register: gcloud_version
+      changed_when: false
+      when: gcloud_check.rc == 0
+
+    - name: Display gcloud version
+      debug:
+        var: gcloud_version.stdout_lines
+      when: gcloud_check.rc == 0
+
+    - name: Check if user is authenticated with gcloud
+      command: gcloud auth list --filter=status:ACTIVE --format="value(account)"
+      register: gcloud_auth
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if not authenticated
+      fail:
+        msg: "Not authenticated with gcloud. Please run 'gcloud auth login' first"
+      when: gcloud_auth.stdout == ""
+
+    - name: Display authenticated account
+      debug:
+        msg: "Authenticated as: {{ gcloud_auth.stdout }}"
+      when: gcloud_auth.stdout != ""
+
+    - name: Check current project
+      command: gcloud config get-value project
+      register: current_project
+      changed_when: false
+
+    - name: Set project if not correct
+      command: gcloud config set project {{ gcp_project }}
+      when: current_project.stdout != gcp_project
+
+    - name: Display current project
+      debug:
+        msg: "Using GCP project: {{ current_project.stdout }}"
+
+    - name: Check if vault credentials file exists
+      stat:
+        path: "{{ vault_creds_file }}"
+      register: creds_file
+
+    - name: Fail if credentials file doesn't exist
+      fail:
+        msg: "Vault credentials file not found at {{ vault_creds_file }}"
+      when: not creds_file.stat.exists
+
+    - name: Read Vault credentials file
+      slurp:
+        path: "{{ vault_creds_file }}"
+      register: vault_creds
+
+    - name: Extract unseal keys and root token
+      set_fact:
+        unseal_keys: "{{ vault_creds.content | b64decode | regex_findall('Unseal Key [1-5]: ([^\\n]+)') }}"
+        root_token: "{{ vault_creds.content | b64decode | regex_findall('Initial Root Token: ([^\\n]+)') | first }}"
+
+    - name: Debug extracted values
+      debug:
+        msg: 
+          - "Unseal keys: {{ unseal_keys }}"
+          - "Root token: {{ root_token }}"
+
+    - name: Debug loop items
+      debug:
+        msg: "Loop item: {{ item }}"
+      with_together:
+        - "{{ range(1, unseal_keys | length + 1) | list }}"
+        - "{{ unseal_keys }}"
+
+    - name: Update unseal key secrets
+      command: >
+        gcloud secrets versions add vault-unseal-key-{{ item.0 }} --data-file=-
+      args:
+        stdin: "{{ item.1 }}"
+      with_together:
+        - "{{ range(1, unseal_keys | length + 1) | list }}"
+        - "{{ unseal_keys }}"
+      changed_when: true
+      no_log: true
+      when: item.1 is defined and item.1 != ""
+
+    - name: Debug root token value
+      debug:
+        var: root_token
+        verbosity: 0
+
+    - name: Verify secrets were updated
+      command: gcloud secrets list --filter="name:vault-*"
+      register: secret_list
+      changed_when: false
+
+    - name: Display updated secrets
+      debug:
+        msg: "Successfully updated Vault secrets in Google Secret Manager"
+
+    - name: Show secret list
+      debug:
+        var: secret_list.stdout_lines 
