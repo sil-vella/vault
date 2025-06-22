@@ -129,6 +129,7 @@ secrets/
 # Configuration files with sensitive data
 values.json
 **/values.json
+*wg0.conf
 
 # Vault credentials
 vault_creds/

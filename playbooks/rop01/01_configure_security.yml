@@ -1,9 +1,68 @@
 ---
 - name: Configure Vault server with security best practices
-  hosts: "{{ vm_name }}_public"
+  hosts: "{{ vm_name }}_private"
   become: true
   become_method: sudo
+  vars:
+    new_user: "{{ vm_name }}_user"
   tasks:
+    - name: Create new user
+      user:
+        name: "{{ new_user }}"
+        shell: /bin/bash
+        createhome: yes
+        groups: sudo
+        append: yes
+        state: present
+
+    - name: Create sudoers.d directory
+      file:
+        path: /etc/sudoers.d
+        state: directory
+        mode: '0755'
+
+    - name: Configure sudo access for new user
+      copy:
+        content: "{{ new_user }} ALL=(ALL) NOPASSWD:ALL"
+        dest: /etc/sudoers.d/{{ new_user }}
+        mode: '0440'
+        validate: 'visudo -cf %s'
+
+    - name: Create .ssh directory for new user
+      file:
+        path: "/home/{{ new_user }}/.ssh"
+        state: directory
+        mode: '0700'
+        owner: "{{ new_user }}"
+        group: "{{ new_user }}"
+
+    - name: Copy root's authorized_keys to new user
+      copy:
+        src: /root/.ssh/authorized_keys
+        dest: "/home/{{ new_user }}/.ssh/authorized_keys"
+        mode: '0600'
+        owner: "{{ new_user }}"
+        group: "{{ new_user }}"
+        remote_src: yes
+
+    - name: Configure SSH daemon for key-based authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      with_items:
+        - { regexp: "^#?PubkeyAuthentication", line: "PubkeyAuthentication yes" }
+        - { regexp: "^#?PasswordAuthentication", line: "PasswordAuthentication no" }
+        - { regexp: "^#?PermitRootLogin", line: "PermitRootLogin yes" }
+        - { regexp: "^#?ChallengeResponseAuthentication", line: "ChallengeResponseAuthentication no" }
+        - { regexp: "^#?UsePAM", line: "UsePAM yes" }
+
+    - name: Restart SSH service
+      service:
+        name: ssh
+        state: restarted
+
     - name: Handle package manager locks
       block:
         - name: Remove package manager locks
@@ -84,4 +143,46 @@
       command: ntpdate pool.ntp.org
       changed_when: false
       ignore_errors: true
+
+    - name: Create systemd service directory for Vault port-forwarding
+      file:
+        path: /etc/systemd/system
+        state: directory
+        mode: '0755'
+
+    - name: Create Vault port-forwarding systemd service
+      copy:
+        content: |
+          [Unit]
+          Description=Vault Kubernetes Port Forward
+          After=network.target k3s.service
+          Wants=k3s.service
+
+          [Service]
+          Type=simple
+          User=root
+          ExecStart=/usr/local/bin/kubectl port-forward -n vault-system svc/vault 8200:8200 --address 0.0.0.0
+          Restart=always
+          RestartSec=10
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/vault-port-forward.service
+        mode: '0644'
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start Vault port-forwarding service
+      systemd:
+        name: vault-port-forward
+        state: started
+        enabled: yes
+
+    - name: Display port-forwarding status
+      debug:
+        msg: "Vault port-forwarding service created and started. Vault is now permanently accessible at http://10.0.0.1:8200"
 

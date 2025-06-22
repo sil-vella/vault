@@ -1,6 +1,6 @@
 ---
 - name: Set up K3s and Kubernetes Access
-  hosts: "{{ vm_name }}_public"
+  hosts: "{{ vm_name }}_private"
   become: true
   become_method: sudo
   tasks:

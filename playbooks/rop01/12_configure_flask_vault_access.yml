@@ -120,3 +120,21 @@
           
           The vault-proxy will handle the WireGuard tunnel connection
           to the Vault server at 10.0.0.1:8200 
+
+    - name: Test Vault accessibility via WireGuard
+      uri:
+        url: http://10.0.0.1:8200/v1/sys/health
+        method: GET
+        status_code: 200
+      register: vault_health_check
+
+    - name: Display Vault health check results
+      debug:
+        msg: |
+          ✅ Vault is accessible via WireGuard tunnel!
+          Status: {{ vault_health_check.json.initialized }}
+          Sealed: {{ vault_health_check.json.sealed }}
+          Version: {{ vault_health_check.json.version }}
+          Cluster: {{ vault_health_check.json.cluster_name }}
+          
+          External applications can now connect to Vault at 10.0.0.1:8200 
