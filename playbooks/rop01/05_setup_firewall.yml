@@ -33,6 +33,17 @@
         comment: Allow SSH from public IP
         state: present
 
+    - name: Allow WireGuard UDP traffic
+      iptables:
+        table: filter
+        chain: INPUT
+        protocol: udp
+        destination_port: 51820
+        source: 0.0.0.0/0
+        jump: ACCEPT
+        comment: Allow WireGuard UDP traffic
+        state: present
+
     - name: Allow Vault (port 8200) from WireGuard interface
       iptables:
         table: filter

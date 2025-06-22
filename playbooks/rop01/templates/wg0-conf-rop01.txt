@@ -1,13 +1,15 @@
 [Interface]
 Address = 10.0.0.1/24
 SaveConfig = false
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ens6 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o ens6 -j MASQUERADE
 ListenPort = 51820
-PrivateKey = <PrivateKey-key-example>
+PrivateKey = <PrivateKey-example>
 
+# macbook
 [Peer]
-PublicKey = <public-key-example>
+PublicKey = <PublicKey-example>
 AllowedIPs = 10.0.0.2/32
-Endpoint = 217.121.147.125:64516
-root@ubuntu:~# 
+
+# rop02
+[Peer]
+PublicKey = <PublicKey-example>
+AllowedIPs = 10.0.0.3/32
