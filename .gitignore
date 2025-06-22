@@ -152,6 +152,7 @@ k3s.yaml
 # Ansible logs and temporary files
 playbooks/*/logs/
 **/logs/
+**/notes/server_setup.md
 
 # Temporary files
 *.tmp
