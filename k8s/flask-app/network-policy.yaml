@@ -27,12 +27,12 @@ spec:
     - protocol: TCP
       port: 6379
   - to:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          name: flask-app
+      podSelector:
         matchLabels:
           app: vault-proxy
-        namespaceSelector:
-          matchLabels:
-            name: flask-app
     ports:
     - protocol: TCP
       port: 8200

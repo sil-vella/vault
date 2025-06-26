@@ -104,22 +104,100 @@
       changed_when: policy_create.rc == 0
       failed_when: policy_create.rc != 0 and "already exists" not in policy_create.stderr
 
+    - name: Create Kubernetes Authentication Role for Flask applications
+      command: >
+        vault write auth/kubernetes/role/flask-app-role
+        bound_service_account_names=flask-app-sa
+        bound_service_account_namespaces=flask-app
+        policies={{ flask_policy_name }}
+        ttl=1h
+      environment:
+        VAULT_ADDR: "http://127.0.0.1:8200"
+      register: role_create
+      changed_when: role_create.rc == 0
+      failed_when: role_create.rc != 0 and "already exists" not in role_create.stderr
+
+    - name: Enable AppRole auth method for cross-cluster access
+      command: vault auth enable approle
+      environment:
+        VAULT_ADDR: "http://127.0.0.1:8200"
+      register: approle_enable
+      changed_when: approle_enable.rc == 0
+      failed_when: approle_enable.rc != 0 and "already enabled" not in approle_enable.stderr and "path is already in use" not in approle_enable.stderr
+
+    - name: Create AppRole for Flask applications
+      command: >
+        vault write auth/approle/role/flask-app-approle
+        token_policies={{ flask_policy_name }}
+        token_ttl=1h
+        token_max_ttl=24h
+        bind_secret_id=true
+        secret_id_ttl=24h
+      environment:
+        VAULT_ADDR: "http://127.0.0.1:8200"
+      register: approle_create
+      changed_when: approle_create.rc == 0
+      failed_when: approle_create.rc != 0 and "already exists" not in approle_create.stderr
+
+    - name: Get AppRole Role ID
+      command: vault read -field=role_id auth/approle/role/flask-app-approle/role-id
+      environment:
+        VAULT_ADDR: "http://127.0.0.1:8200"
+      register: role_id_result
+      changed_when: false
+
+    - name: Generate AppRole Secret ID
+      command: vault write -field=secret_id -f auth/approle/role/flask-app-approle/secret-id
+      environment:
+        VAULT_ADDR: "http://127.0.0.1:8200"
+      register: secret_id_result
+      changed_when: false
+
+    - name: Store AppRole credentials locally
+      copy:
+        content: |
+          VAULT_ROLE_ID={{ role_id_result.stdout }}
+          VAULT_SECRET_ID={{ secret_id_result.stdout }}
+        dest: "{{ playbook_dir }}/vault_creds/flask-approle-creds.txt"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+
+    - name: Create test secret for Flask application
+      command: >
+        vault kv put secret/flask-app/config
+        api_key=test123
+        database_url=postgresql://user:pass@db:5432/app
+        app_name=flask-credit-system
+      environment:
+        VAULT_ADDR: "http://127.0.0.1:8200"
+      register: secret_create
+      changed_when: secret_create.rc == 0
+
     - name: Display configuration status
       debug:
         msg: |
           Vault has been configured for external applications:
-          - Kubernetes auth method enabled
-          - Kubernetes auth method configured
+          - Kubernetes auth method enabled (for same-cluster apps)
+          - AppRole auth method enabled (for cross-cluster apps)
           - Policy created: {{ flask_policy_name }}
+          - Kubernetes role created: flask-app-role
+          - AppRole created: flask-app-approle
+          - Test secret created at secret/flask-app/config
+          
+          AppRole Credentials (for cross-cluster Flask app):
+          - Role ID: {{ role_id_result.stdout }}
+          - Secret ID: {{ secret_id_result.stdout[:20] }}... (truncated for security)
+          - Credentials saved to: {{ playbook_dir }}/vault_creds/flask-approle-creds.txt
           
           External applications should:
           1. Deploy the vault-proxy in their cluster
           2. Configure their applications to use the vault-proxy service
-          3. Use the flask-app role for authentication
+          3. Use AppRole authentication with the credentials above
           4. Access secrets under secret/data/flask-app/*
           
           The vault-proxy will handle the WireGuard tunnel connection
-          to the Vault server at 10.0.0.1:8200 
+          to the Vault server at 10.0.0.1:8200
 
     - name: Test Vault accessibility via WireGuard
       uri:

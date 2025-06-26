@@ -159,3 +159,9 @@ playbooks/*/logs/
 *.temp
 *.swp
 *~
+
+# Backup files and archives
+**/backup/backups/
+**/backups/*.tar.gz
+**/backups/*.log
+backup_*.tar.gz
